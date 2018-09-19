@@ -331,7 +331,7 @@ Device* Body::findDeviceSub(const std::string& name) const
     if(p != impl->deviceNameMap.end()){
         return p->second;
     }
-    return 0;
+    return nullptr;
 }
 
 
@@ -341,7 +341,7 @@ Referenced* Body::findCacheSub(const std::string& name)
     if(p != impl->cacheMap.end()){
         return p->second;
     }
-    return 0;
+    return nullptr;
 }
 
 
@@ -351,7 +351,7 @@ const Referenced* Body::findCacheSub(const std::string& name) const
     if(p != impl->cacheMap.end()){
         return p->second;
     }
-    return 0;
+    return nullptr;
 }
 
 
@@ -399,26 +399,27 @@ const Vector3& Body::centerOfMass() const
 }
 
 
-void Body::initializeState()
+void Body::initializePosition()
 {
     rootLink_->T() = rootLink_->Tb();
 
-    rootLink_->v().setZero();
-    rootLink_->w().setZero();
-    rootLink_->dv().setZero();
-    rootLink_->dw().setZero();
-    
-    const int n = linkTraverse_.numLinks();
-    for(int i=0; i < n; ++i){
-        Link* link = linkTraverse_[i];
-        link->u() = 0.0;
+    for(auto& link : linkTraverse_){
         link->q() = link->q_initial();
-        link->dq() = 0.0;
-        link->ddq() = 0.0;
+        link->initializeState();
     }
- 
+
     calcForwardKinematics(true, true);
-    clearExternalForces();
+    initializeDeviceStates();
+}
+
+
+void Body::initializeState()
+{
+    for(auto& link : linkTraverse_){
+        link->initializeState();
+    }
+
+    calcForwardKinematics(true, true);
     initializeDeviceStates();
 }
 
@@ -506,14 +507,28 @@ BodyCustomizerInterface* Body::customizerInterface() const
 
 bool Body::hasVirtualJointForces() const
 {
-    return (impl->customizerInterface && impl->customizerInterface->setVirtualJointForces);
+    if(impl->customizerInterface){
+        if(impl->customizerInterface->setVirtualJointForces){
+            return true;
+        }
+        if(impl->customizerInterface->version >= 2 &&
+           impl->customizerInterface->setVirtualJointForces2){
+            return true;
+        }
+    }
+    return false;
 }
 
 
-void Body::setVirtualJointForces()
+void Body::setVirtualJointForces(double timeStep)
 {
-    if(impl->customizerInterface && impl->customizerInterface->setVirtualJointForces){
-        impl->customizerInterface->setVirtualJointForces(impl->customizerHandle);
+    auto customizer = impl->customizerInterface;
+    if(customizer){
+        if(customizer->version >= 2 && customizer->setVirtualJointForces2){
+            customizer->setVirtualJointForces2(impl->customizerHandle, timeStep);
+        } else if(customizer->setVirtualJointForces){
+            customizer->setVirtualJointForces(impl->customizerHandle);
+        }
     }
 }
 

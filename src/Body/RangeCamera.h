@@ -36,6 +36,9 @@ public:
 
     bool isOrganized() const { return isOrganized_; }
     void setOrganized(bool on);
+
+    bool isDense() const { return isDense_; }
+    void setDense(bool on) { isDense_ = on; }
             
     std::shared_ptr<const PointData> sharedPoints() const { return points_; }
 
@@ -49,8 +52,8 @@ public:
 private:
     std::shared_ptr< std::vector<Vector3f> > points_;
     bool isOrganized_;
+    bool isDense_;
 
-    RangeCamera(const RangeCamera& org, int x);
     void copyRangeCameraStateFrom(const RangeCamera& other);    
 };
 

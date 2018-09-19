@@ -20,11 +20,13 @@ set(sources
   SimulationScriptItem.cpp
   AISTSimulatorItem.cpp
   GLVisionSimulatorItem.cpp
+  FisheyeLensConverter.cpp
   SensorVisualizerItem.cpp
   BodyTrackingCameraItem.cpp
+  BodyMarkerItem.cpp
   BodyMotionEngine.cpp
   KinematicFaultChecker.cpp
-  #FilterDialogs.cpp
+  SplineFilterDialog.cpp
   EditableSceneBody.cpp
   BodyBar.cpp
   LeggedBodyBar.cpp
@@ -61,6 +63,7 @@ set(headers
   GLVisionSimulatorItem.h
   SensorVisualizerItem.h
   BodyTrackingCameraItem.h
+  BodyMarkerItem.h
   KinematicFaultChecker.h
   BodyBar.h
   KinematicsBar.h
@@ -87,7 +90,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_cnoid_plugin(${target} SHARED ${sources} ${headers} ${mofiles} ${RC_SRCS})
 
-set(boost_libraries ${Boost_REGEX_LIBRARY} ${Boost_IOSTREAMS_LIBRARY})
+set(boost_libraries ${Boost_IOSTREAMS_LIBRARY})
 if(MSVC)
   set(boost_libraries ${boost_libraries} ${Boost_BZIP2_LIBRARY} ${Boost_ZLIB_LIBRARY})
 endif()

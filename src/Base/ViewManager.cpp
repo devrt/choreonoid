@@ -474,7 +474,7 @@ ViewManagerImpl::ViewManagerImpl(ExtensionManager* ext)
 ViewManager::~ViewManager()
 {
     // This must be done before deleting impl because
-    // ViewManager's functions may be callsed when a view is destroyed.
+    // ViewManager's functions may be called when a view is destroyed.
     while(!impl->instances.empty()){
         InstanceInfoPtr& instance = *(impl->instances.rbegin());
         instance->remove();
@@ -816,8 +816,10 @@ static View* restoreView(Archive* archive, const string& moduleName, const strin
 }
 
 
-void ViewManager::restoreViews(ArchivePtr archive, const std::string& key, ViewManager::ViewStateInfo& out_viewStateInfo)
+bool ViewManager::restoreViews(ArchivePtr archive, const std::string& key, ViewManager::ViewStateInfo& out_viewStateInfo)
 {
+    bool restored = false;
+    
     Listing* viewList = archive->findListing(key);
     
     if(viewList->isValid() && !viewList->empty()){
@@ -859,12 +861,14 @@ void ViewManager::restoreViews(ArchivePtr archive, const std::string& key, ViewM
                             if(viewArchive->get("mounted", false)){
                                 mainWindow->viewArea()->addView(view);
                             }
+                            restored = true;
                         }
                     }
                 }
             }
         }
     }
+    return restored;
 }
 
 

@@ -5,48 +5,58 @@
 
 #include <cnoid/SimpleController>
 #include <cnoid/SpotLight>
+#include <cnoid/RangeCamera>
+#include <cnoid/RangeSensor>
 #include <cnoid/Joystick>
 
 using namespace std;
 using namespace cnoid;
 
-namespace {
-
-const int axisID[] = { 0, 1, 2, 3 };
-const int buttonID[] = { 0, 2, 3 };
-
-}
-
 class TankJoystickController : public SimpleController
 {
+    SimpleControllerIO* io;
     bool usePseudoContinousTrackMode;
-    Link::ActuationMode turretAcutuationMode;
+    Link::ActuationMode turretActuationMode;
     Link* trackL;
     Link* trackR;
     Link* turretJoint[2];
     double qref[2];
     double qprev[2];
     double dt;
-    LightPtr light;
+
+    struct DeviceInfo {
+        DevicePtr device;
+        int buttonId;
+        bool prevButtonState;
+        bool stateChanged;
+        DeviceInfo(Device* device, int buttonId)
+            : device(device),
+              buttonId(buttonId),
+              prevButtonState(false),
+              stateChanged(false)
+        { }
+    };
+    vector<DeviceInfo> devices;
     SpotLightPtr spotLight;
-    bool prevLightButtonState;
+    
     Joystick joystick;
 
 public:
     
     virtual bool initialize(SimpleControllerIO* io) override
     {
+        this->io = io;
         ostream& os = io->os();
         Body* body = io->body();
 
         usePseudoContinousTrackMode = true;
-        turretAcutuationMode = Link::ActuationMode::JOINT_TORQUE;
+        turretActuationMode = Link::ActuationMode::JOINT_TORQUE;
         for(auto opt : io->options()){
             if(opt == "wheels"){
                 usePseudoContinousTrackMode = false;
             }
             if(opt == "velocity"){
-                turretAcutuationMode = Link::ActuationMode::JOINT_VELOCITY;
+                turretActuationMode = Link::ActuationMode::JOINT_VELOCITY;
             }
         }
 
@@ -83,27 +93,24 @@ public:
                 return false;
             }
             qref[i] = qprev[i] = joint->q();
-            joint->setActuationMode(turretAcutuationMode);
+            joint->setActuationMode(turretActuationMode);
             io->enableIO(joint);
         }
 
         dt = io->timeStep();
-        
-        DeviceList<Light> lights(body->devices());
-        if(!lights.empty()){
-            light = lights.front();
-            spotLight = dynamic_pointer_cast<SpotLight>(light);
-        }
-        prevLightButtonState = false;
 
-        if(!joystick.isReady()){
-            os << "Joystick is not ready: " << joystick.errorMessage() << endl;
-        }
-        if(joystick.numAxes() < 5){
-            os << "The number of the joystick axes is not sufficient for controlling the robot." << endl;
-        }
-        if(joystick.numButtons() < 1){
-            os << "The number of the joystick buttons is not sufficient for controlling the robot." << endl;
+        devices = {
+            { body->findDevice<SpotLight>("Light"),    Joystick::A_BUTTON },
+            { body->findDevice<RangeCamera>("Kinect"), Joystick::B_BUTTON },
+            { body->findDevice<Camera>("Theta"),       Joystick::X_BUTTON },
+            { body->findDevice<RangeSensor>("VLP-16"), Joystick::Y_BUTTON }
+        };
+        spotLight = dynamic_pointer_cast<SpotLight>(devices[0].device);
+
+        // Turn on all the devices
+        for(auto& device : devices){
+            device.device->on(true);
+            device.device->notifyStateChange();
         }
 
         return true;
@@ -115,7 +122,8 @@ public:
         
         double pos[2];
         for(int i=0; i < 2; ++i){
-            pos[i] = joystick.getPosition(axisID[i]);
+            pos[i] = joystick.getPosition(
+                i==0 ? Joystick::L_STICK_H_AXIS : Joystick::L_STICK_V_AXIS);
             if(fabs(pos[i]) < 0.2){
                 pos[i] = 0.0;
             }
@@ -123,13 +131,12 @@ public:
         // set the velocity of each tracks
         if(usePseudoContinousTrackMode){
             double k = 1.0;
-            trackL->dq() = k * (-2.0 * pos[1] + pos[0]);
-            trackR->dq() = k * (-2.0 * pos[1] - pos[0]);
-
-        }else{
+            trackL->dq_target() = k * (-2.0 * pos[1] + pos[0]);
+            trackR->dq_target() = k * (-2.0 * pos[1] - pos[0]);
+        } else {
             double k = 4.0;
-            trackL->dq() = k * (-pos[1] + pos[0]);
-            trackR->dq() = k * (-pos[1] - pos[0]);
+            trackL->dq_target() = k * (-pos[1] + pos[0]);
+            trackR->dq_target() = k * (-pos[1] - pos[0]);
         }
 
         static const double P = 200.0;
@@ -137,43 +144,51 @@ public:
 
         for(int i=0; i < 2; ++i){
             Link* joint = turretJoint[i];
-            double q = joint->q();
-            double dq = (q - qprev[i]) / dt;
-            double dqref = 0.0;
-            double pos = joystick.getPosition(axisID[i + 2]);
-            if(fabs(pos) > 0.25){
+            double pos = joystick.getPosition(
+                i==0 ? Joystick::R_STICK_H_AXIS : Joystick::R_STICK_V_AXIS);
+            if(fabs(pos) < 0.15){
+                pos = 0.0;
+            }
+
+            if(turretActuationMode == Link::JOINT_VELOCITY){
+                joint->dq_target() = pos;
+
+            } else if(turretActuationMode == Link::JOINT_TORQUE){
+                double q = joint->q();
+                double dq = (q - qprev[i]) / dt;
+                double dqref = 0.0;
                 double deltaq = 0.002 * pos;
                 qref[i] += deltaq;
                 dqref = deltaq / dt;
+                joint->u() = P * (qref[i] - q) + D * (dqref - dq);
+                qprev[i] = q;
             }
-            joint->u() = P * (qref[i] - q) + D * (dqref - dq);
-            qprev[i] = q;
         }
 
-        if(light){
-            bool changed = false;
-            
-            bool lightButtonState = joystick.getButtonState(buttonID[0]);
-            if(lightButtonState){
-                if(!prevLightButtonState){
-                    light->on(!light->on());
-                    changed = true;
+        for(auto& info : devices){
+            if(info.device){
+                bool stateChanged = false;
+                bool buttonState = joystick.getButtonState(info.buttonId);
+                if(buttonState && !info.prevButtonState){
+                    info.device->on(!info.device->on());
+                    stateChanged = true;
                 }
-            }
-            prevLightButtonState = lightButtonState;
-
-            if(spotLight){
-                if(joystick.getButtonState(buttonID[1])){
-                    spotLight->setBeamWidth(std::max(0.1f, spotLight->beamWidth() - 0.001f));
-                    changed = true;
-                } else if(joystick.getButtonState(buttonID[2])){
-                    spotLight->setBeamWidth(std::min(0.7854f, spotLight->beamWidth() + 0.001f));
-                    changed = true;
+                auto spotLight = dynamic_pointer_cast<SpotLight>(info.device);
+                if(spotLight){
+                    if(joystick.getPosition(Joystick::R_TRIGGER_AXIS) > 0.1){
+                        spotLight->setBeamWidth(
+                            std::max(0.1f, spotLight->beamWidth() - 0.001f));
+                        stateChanged = true;
+                    } else if(joystick.getButtonState(Joystick::R_BUTTON)){
+                        spotLight->setBeamWidth(
+                            std::min(0.7854f, spotLight->beamWidth() + 0.001f));
+                        stateChanged = true;
+                    }
                 }
-            }
-
-            if(changed){
-                light->notifyStateChange();
+                info.prevButtonState = buttonState;
+                if(stateChanged){
+                    info.device->notifyStateChange();
+                }
             }
         }
 

@@ -96,7 +96,7 @@ void NameServerViewImpl::updateObjectList()
 
     ncHelper.setLocation(hostAddressBox.string(), portNumberSpin.value());
     
-    if(ncHelper.isAlive()){
+    if(ncHelper.updateConnection()){
 
         NamingContextHelper::ObjectInfoList objects = ncHelper.getObjectList();
 
@@ -107,9 +107,9 @@ void NameServerViewImpl::updateObjectList()
             if(true){
 
                 QTreeWidgetItem* item = new QTreeWidgetItem();
-                QString name = info.id.c_str();
-                if(!info.kind.empty()){
-                    name += QString("(%1)").arg(QString::fromStdString(info.kind));
+                QString name = info.id_.c_str();
+                if(!info.kind_.empty()){
+                    name += QString("(%1)").arg(QString::fromStdString(info.kind_));
                 }
                 item->setText(0, name);
                 treeWidget.addTopLevelItem(item);

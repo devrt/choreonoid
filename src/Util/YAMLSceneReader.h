@@ -6,15 +6,14 @@
 #ifndef CNOID_UTIL_YAML_SCENE_READER_H
 #define CNOID_UTIL_YAML_SCENE_READER_H
 
-#include <cnoid/EigenUtil>
-#include <cnoid/SceneGraph>
+#include "EigenUtil.h"
+#include "SceneGraph.h"
+#include "ValueTree.h"
 #include "exportdecl.h"
 
 namespace cnoid {
 
-class ValueNode;
-class Mapping;
-class Listing;
+class YAMLReader;
 class YAMLSceneReaderImpl;
   
 class CNOID_EXPORT YAMLSceneReader
@@ -28,10 +27,11 @@ public:
     int defaultDivisionNumber() const;
     void setBaseDirectory(const std::string& directory);
     std::string baseDirectory();
+    void setYAMLReader(YAMLReader* reader);
 
     void clear();
 
-    void readHeader(Mapping& node);
+    void readHeader(Mapping& info);
 
     enum AngleUnit { DEGREE, RADIAN };
     void setAngleUnit(AngleUnit unit);
@@ -41,13 +41,25 @@ public:
     double toRadian(double angle) const {
         return isDegreeMode_ ? radian(angle) : angle;
     }
-    bool readAngle(Mapping& node, const char* key, double& angle);
-    bool readRotation(Mapping& node, Matrix3& out_R, bool doExtract);
-    SgNode* readNode(Mapping& node);
-    SgNode* readNode(Mapping& node, const std::string& type);
-    SgNode* readNodeList(ValueNode& node);
+    float toRadian(float angle) const {
+        return isDegreeMode_ ? radian(angle) : angle;
+    }
+    bool readAngle(const Mapping& info, const char* key, double& angle) const;
+    bool readAngle(const Mapping& info, const char* key, float& angle) const;
+    bool readRotation(const Mapping& info, Matrix3& out_R) const;
+    bool extractRotation(Mapping& info, Matrix3& out_R) const;
+    SgNode* readNode(Mapping& info);
+    SgNode* readNode(Mapping& info, const std::string& type);
+    SgNode* readNodeList(ValueNode& info);
+
+    struct Resource {
+        SgNodePtr scene;
+        ValueNodePtr info;
+        std::string directory;
+    };
+    Resource readResourceNode(Mapping& info);
     
-    SgObject* readObject(Mapping& node);
+    SgObject* readObject(Mapping& info);
 
     typedef std::function<std::string(const std::string& path, std::ostream& os)> UriSchemeHandler;
     
@@ -57,7 +69,8 @@ private:
     YAMLSceneReaderImpl* impl;
     friend class YAMLSceneReaderImpl;
     bool isDegreeMode_;
-    AngleAxis readAngleAxis(const Listing& rotation);
+    bool readRotation(const ValueNode* info, Matrix3& out_R) const;
+    AngleAxis readAngleAxis(const Listing& rotation) const;
 };
 
 }

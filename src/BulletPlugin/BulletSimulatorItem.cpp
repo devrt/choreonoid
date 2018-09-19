@@ -11,10 +11,8 @@
 #include <cnoid/Body>
 #include <cnoid/BodyItem>
 #include <cnoid/Link>
-#include <cnoid/ColdetModel>
 #include <cnoid/FloatingNumberString>
 #include <cnoid/BasicSensorSimulationHelper>
-#include <cnoid/BodyCollisionDetectorUtil>
 #include <cnoid/MeshExtractor>
 #include <cnoid/SceneDrawables>
 #include <btBulletDynamicsCommon.h>
@@ -117,7 +115,6 @@ public:
     vector<btJointFeedback*> forceSensorFeedbacks;
     vector<btMultiBodyJointFeedback*> multiBodyforceSensorFeedbacks;
     BasicSensorSimulationHelper sensorHelper;
-    int geometryId;
 
     BodyPtr body;
 
@@ -159,12 +156,9 @@ public:
     double friction;
     double erp2;
     double splitImpulsePenetrationThreshold;
-    bool useWorldCollision;
     bool useHACD;                           // Hierarchical Approximate Convex Decomposition
     double collisionMargin;
     bool usefeatherstoneAlgorithm;
-    CollisionDetectorPtr collisionDetector;
-    vector<BulletLink*> geometryIdToLink;
 
     BulletSimulatorItemImpl(BulletSimulatorItem* self);
     BulletSimulatorItemImpl(BulletSimulatorItem* self, const BulletSimulatorItemImpl& org);
@@ -228,7 +222,7 @@ static bool CustomMaterialCombinerCallback(btManifoldPoint& cp, const btCollisio
 
     cp.m_lateralFrictionDir1.setValue(frictionDir1.x(), frictionDir1.y(), frictionDir1.z());
     cp.m_lateralFrictionDir2.setValue(frictionDir2.x(), frictionDir2.y(), frictionDir2.z());
-    cp.m_contactMotion1 = crawlerlink->dq();
+    cp.m_contactMotion1 = crawlerlink->dq_target();
 
 #if 0
     std::cout << frictionDir1.x() << " " << frictionDir1.y() << " " << frictionDir1.z() << std::endl;
@@ -277,7 +271,7 @@ void BulletLink::createGeometry()
 {
     if(link->collisionShape()){
         MeshExtractor* extractor = new MeshExtractor;
-        if(extractor->extract(link->collisionShape(), std::bind(&BulletLink::addMesh, this, extractor, meshOnly))){
+        if(extractor->extract(link->collisionShape(), [&](){ addMesh( extractor, meshOnly); } )){
             if(!simImpl->useHACD && !isStatic){
                 if(!mixedPrimitiveMesh){
                     if(!vertices.empty()){
@@ -291,7 +285,7 @@ void BulletLink::createGeometry()
                             collisionShape = 0;
                             vertices.clear();
                             triangles.clear();
-                            extractor->extract(link->shape(), std::bind(&BulletLink::addMesh, this, std::ref(extractor), true));
+                            extractor->extract(link->shape(), [&](){ addMesh( std::ref(extractor), true ); } );
                         }
                     }
                 }
@@ -606,9 +600,7 @@ void BulletLink::createLinkBody(BulletSimulatorItemImpl* simImpl, BulletLink* pa
 
     btMultiBody* multiBody = 0;
     if(bulletBody->multiBody){
-
-        if(!simImpl->useWorldCollision)
-            createGeometry();
+        createGeometry();
 
         multiBody = bulletBody->multiBody;
         if(link->isRoot()){
@@ -621,9 +613,7 @@ void BulletLink::createLinkBody(BulletSimulatorItemImpl* simImpl, BulletLink* pa
             isStatic = true;
             mass = 0.0;
         }
-
-        if(!simImpl->useWorldCollision)
-            createGeometry();
+        createGeometry();
 
         motionState = new btDefaultMotionState(transform * shift);
         btRigidBody::btRigidBodyConstructionInfo rbInfo(mass,motionState,collisionShape,localInertia);
@@ -996,14 +986,14 @@ void BulletLink::setVelocityToBullet()
 {
     if(bulletBody->multiBody){
         if(motor)
-            motor->setVelocityTarget(link->dq());
+            motor->setVelocityTarget(link->dq_target());
     }else{
         if(link->isRotationalJoint()){
-            double v = link->dq();
+            double v = link->dq_target();
             ((btHingeConstraint*)joint)->enableAngularMotor(true, v, numeric_limits<double>::max());
 
         } else if(link->isSlideJoint()){
-            double v = link->dq();
+            double v = link->dq_target();
             ((btGeneric6DofConstraint*)joint)->getTranslationalLimitMotor()->m_enableMotor[2] = true;
             ((btGeneric6DofConstraint*)joint)->getTranslationalLimitMotor()->m_targetVelocity[2] = v;
             ((btGeneric6DofConstraint*)joint)->getTranslationalLimitMotor()->m_maxMotorForce[2] =  numeric_limits<double>::max();
@@ -1068,25 +1058,7 @@ void BulletBody::createBody(BulletSimulatorItemImpl* simImpl_, short group)
         dynamic_cast<btMultiBodyDynamicsWorld*>(simImpl->dynamicsWorld)->addMultiBody(multiBody);
     }
 
-    if(simImpl->useWorldCollision){
-        geometryId = addBodyToCollisionDetector(*body, *simImpl->collisionDetector, 
-                                                bodyItem()->isSelfCollisionDetectionEnabled());
-    }
-
     setKinematicStateToBullet();
-
-    if(simImpl->useWorldCollision){
-        int size = simImpl->geometryIdToLink.size();
-        int numLinks = bulletLinks.size();
-        simImpl->geometryIdToLink.resize(geometryId+numLinks);
-        for(int i=0; i < numLinks; i++){
-            BulletLink* bulletLink = bulletLinks[i].get();
-            int index = bulletLink->link->index();
-            simImpl->geometryIdToLink[geometryId+index] = bulletLink;
-            simImpl->collisionDetector->updatePosition(geometryId+index, bulletLink->link->T());
-        }
-    }
-
     setExtraJoints();
     setControlValToBullet();
 
@@ -1333,7 +1305,6 @@ BulletSimulatorItemImpl::BulletSimulatorItemImpl(BulletSimulatorItem* self)
     collisionMargin = DEFAULT_COLLISION_MARGIN;
     usefeatherstoneAlgorithm = true;
 
-    useWorldCollision = false;
 }
 
 
@@ -1359,7 +1330,6 @@ BulletSimulatorItemImpl::BulletSimulatorItemImpl(BulletSimulatorItem* self, cons
     collisionMargin = org.collisionMargin;
     usefeatherstoneAlgorithm = org.usefeatherstoneAlgorithm;
 
-    useWorldCollision = org.useWorldCollision;
 }
 
 void BulletSimulatorItemImpl::initialize()
@@ -1373,7 +1343,6 @@ void BulletSimulatorItemImpl::initialize()
     gContactAddedCallback = 0;
 
     //self->SimulatorItem::setAllLinkPositionOutputMode(true);
-    geometryIdToLink.clear();
 }
 
 BulletSimulatorItem::~BulletSimulatorItem()
@@ -1435,10 +1404,6 @@ bool BulletSimulatorItemImpl::initializeSimulation(const std::vector<SimulationB
         dynamicsWorld = new btDiscreteDynamicsWorld(dispatcher,broadphase,solver,collisionConfiguration);
         self->setAllLinkPositionOutputMode(true);
     }
-    if(useWorldCollision){
-        collisionDetector = self->collisionDetector();
-        collisionDetector->clearGeometries();
-    }
 
     btVector3 g(gravity.x(), gravity.y(), gravity.z());
     dynamicsWorld->setGravity(g);
@@ -1456,10 +1421,7 @@ bool BulletSimulatorItemImpl::initializeSimulation(const std::vector<SimulationB
         addBody(static_cast<BulletBody*>(simBodies[i]), group);
     }
 
-    if(useWorldCollision)
-        collisionDetector->makeReady();
-    else
-        btGImpactCollisionAlgorithm::registerAlgorithm(dispatcher);
+    btGImpactCollisionAlgorithm::registerAlgorithm(dispatcher);
 
     return true;
 }
@@ -1493,6 +1455,8 @@ void BulletSimulatorItemImpl::addBody(BulletBody* bulletBody, short group)
         joint->u() = 0.0;
         joint->dq() = 0.0;
         joint->ddq() = 0.0;
+        joint->q_target() = joint->q();
+        joint->dq_target() = joint->dq();
     }
     
     body->clearExternalForces();
@@ -1641,4 +1605,10 @@ void BulletSimulatorItemImpl::setSolverParameter()
         slvInfo.m_solverMode |= SOLVER_DISABLE_VELOCITY_DEPENDENT_FRICTION_DIRECTION + SOLVER_USE_2_FRICTION_DIRECTIONS;
         slvInfo.m_solverMode |= SOLVER_ENABLE_FRICTION_DIRECTION_CACHING;
     }
+}
+
+
+Vector3 BulletSimulatorItem::getGravity() const
+{
+    return impl->gravity;
 }

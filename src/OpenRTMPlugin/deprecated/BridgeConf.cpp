@@ -5,15 +5,28 @@
 
 #include "BridgeConf.h"
 #include "../OpenRTMUtil.h"
-#include <boost/regex.hpp>
+#include "../LoggerUtil.h"
+#include <cnoid/Config>
 #include <boost/format.hpp>
 #include <boost/filesystem.hpp>
 #include <iostream>
 
+#ifdef CNOID_USE_BOOST_REGEX
+#include <boost/regex.hpp>
+using boost::regex;
+using boost::match_results;
+using boost::regex_search;
+namespace regex_constants = boost::regex_constants;
+#else
+#include <regex>
+#endif
+
 using namespace std;
+using namespace cnoid;
 namespace program_options = boost::program_options;
 namespace filesystem = boost::filesystem;
 using boost::format;
+
 
 BridgeConf::BridgeConf() :
     options("Allowed options"),
@@ -213,7 +226,10 @@ void BridgeConf::setPortInfos(const char* optionLabel, PortInfoMap& portInfos)
         info.portName = parameters[0];
         int j;
         for(j=1; j<3; j++){
-            LabelToDataTypeIdMap::iterator it = labelToDataTypeIdMap.find(parameters[j]);
+					if (parameters.size() <= j) {
+						throw invalid_argument(string("invalid in port setting"));
+					}
+					LabelToDataTypeIdMap::iterator it = labelToDataTypeIdMap.find(parameters[j]);
             if(it == labelToDataTypeIdMap.end() ){ // Handle as identification name because it is not a property name
                 if(j==2)    // Error because there is no property name by the third
                     throw invalid_argument(string("invalid data type"));
@@ -336,11 +352,15 @@ void BridgeConf::addTimeRateInfo(const std::string& value)
     }
 }
 
-void BridgeConf::setupModules()
-{
+void BridgeConf::setupModules() {
+  DDEBUG("BridgeConf::setupModules");
     RTC::Manager& rtcManager = RTC::Manager::instance();
     ModuleInfoList::iterator moduleInfo = moduleInfoList.begin();
+#if defined(OPENRTM_VERSION11)
     format param("%1%?exec_cxt.periodic.type=ChoreonoidExecutionContext&exec_cxt.periodic.rate=1000000");
+#elif defined(OPENRTM_VERSION12)
+    format param("%1%?execution_contexts=ChoreonoidExecutionContext(),OpenHRPExecutionContext()&exec_cxt.periodic.type=ChoreonoidExecutionContext&exec_cxt.periodic.rate=1000000&exec_cxt.sync_activation=NO&exec_cxt.sync_deactivation=NO");
+#endif
     while(moduleInfo != moduleInfoList.end()){
         if(!moduleInfo->isLoaded){
             rtcManager.load(moduleInfo->fileName.c_str(), moduleInfo->initFuncName.c_str());
@@ -390,10 +410,10 @@ void BridgeConf::extractParameters(const std::string& str, std::vector<std::stri
 
 std::string BridgeConf::expandEnvironmentVariables(const std::string& str)
 {
-    boost::regex variablePattern("\\$([A-z][A-z_0-9]*)");
+    regex variablePattern("\\$([A-z][A-z_0-9]*)");
     
-    boost::match_results<string::const_iterator> result; 
-    boost::regex_constants::match_flag_type flags = boost::regex_constants::match_default; 
+    match_results<string::const_iterator> result; 
+    regex_constants::match_flag_type flags = regex_constants::match_default; 
     
     string::const_iterator start, end;
     std::string str_(str);
@@ -401,17 +421,15 @@ std::string BridgeConf::expandEnvironmentVariables(const std::string& str)
     end = str_.end();
     int pos = 0;
 
-    vector< pair< int, int > > results;
+    vector<pair<int, int>> results;
 
-    while ( boost::regex_search(start, end, result, variablePattern, flags) ) {
+    while(regex_search(start, end, result, variablePattern, flags)){
         results.push_back(std::make_pair(pos+result.position(1), result.length(1)));
 
         // seek to the remaining part
         start = result[0].second;
         pos += result.length(0);
-
-        flags |= boost::match_prev_avail; 
-        flags |= boost::match_not_bob; 
+        flags |= regex_constants::match_prev_avail; 
     }
     // replace the variables in reverse order
     while (!results.empty()) {

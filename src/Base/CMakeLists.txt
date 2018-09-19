@@ -22,6 +22,7 @@ set(sources
   ItemManager.cpp
   Item.cpp
   RootItem.cpp
+  ItemList.cpp
   ItemPath.cpp
   ItemTreeView.cpp
   ItemPropertyView.cpp
@@ -65,7 +66,7 @@ set(sources
   AbstractSeqItem.cpp
   MultiValueSeqItem.cpp
   MultiSE3SeqItem.cpp
-  MultiAffine3SeqItem.cpp
+  MultiSE3MatrixSeqItem.cpp
   Vector3SeqItem.cpp
   ExtCommandItem.cpp
   AbstractTextItem.cpp
@@ -83,6 +84,7 @@ set(sources
   ShaderPrograms.cpp
   GLSLSceneRenderer.cpp
   SceneWidget.cpp
+  SceneWidgetEvent.cpp
   SceneWidgetEditable.cpp
   InteractiveCameraTransform.cpp
   SceneProjector.cpp
@@ -103,6 +105,7 @@ set(sources
   TextEdit.cpp
   TaskView.cpp
   VirtualJoystickView.cpp
+  MessageLogItem.cpp
   gl_core_3_3.c
   #gl_core_4_0.c
   #gl_core_4_4.c
@@ -165,7 +168,7 @@ set(headers
   MultiSeqItem.h
   MultiValueSeqItem.h
   MultiSE3SeqItem.h
-  MultiAffine3SeqItem.h
+  MultiSE3MatrixSeqItem.h
   Vector3SeqItem.h
   ExtCommandItem.h
   AbstractTextItem.h
@@ -204,6 +207,7 @@ set(headers
   JoystickCapture.h
   TextEdit.h
   TaskView.h
+  MessageLogItem.h
   exportdecl.h
   )
 
@@ -248,29 +252,22 @@ make_gettext_mofiles(${target} mofiles)
 add_cnoid_library(${target} SHARED ${sources} ${headers} ${mofiles} ${RC_SRCS})
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-
   target_link_libraries(${target}
     CnoidUtil
     ${QT_LIBRARIES} ${Boost_PROGRAM_OPTIONS_LIBRARY} ${OPENGL_LIBRARIES}
     intl
     )
-
-elseif(UNIX)
-
+elseif(MSVC)
+  target_link_libraries(${target}
+    CnoidUtil
+    ${QT_LIBRARIES}
+    general glu32 opengl32
+    )
+else()
   target_link_libraries(${target}
     CnoidUtil
     ${QT_LIBRARIES} ${Boost_PROGRAM_OPTIONS_LIBRARY} ${OPENGL_LIBRARY}
-    icuuc
-    X11
-    Xfixes
-    )
-
-elseif(MSVC)
-
-  target_link_libraries(${target}
-    ${QT_LIBRARIES}
-    general glu32 opengl32
-    CnoidUtil
+    icuuc X11 Xfixes
     )
 endif()
 

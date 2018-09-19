@@ -5,6 +5,7 @@
 
 #include "Camera.h"
 
+using namespace std;
 using namespace cnoid;
 
 
@@ -17,8 +18,9 @@ const char* Camera::typeName()
 Camera::Camera()
 {
     on_ = true;
-    imageType_ = COLOR_IMAGE;
     isImageStateClonable_ = false;
+    imageType_ = COLOR_IMAGE;
+    lensType_ = NORMAL_LENS;
     resolutionX_ = 640;
     resolutionY_ = 480;
     fieldOfView_ = 0.785398;
@@ -27,6 +29,20 @@ Camera::Camera()
     frameRate_ = 30.0;
     delay_ = 0.0;
     image_ = std::make_shared<Image>();
+}
+
+
+Camera::Camera(const Camera& org, bool copyStateOnly)
+    : Device(org, copyStateOnly),
+      image_(org.image_)
+{
+    if(copyStateOnly){
+        isImageStateClonable_ = true;
+    } else {
+        isImageStateClonable_ = org.isImageStateClonable_;
+    }
+
+    copyCameraStateFrom(org);
 }
 
 
@@ -49,8 +65,8 @@ void Camera::copyStateFrom(const Camera& other)
 void Camera::copyCameraStateFrom(const Camera& other)
 {
     on_ = other.on_;
-    isImageStateClonable_ = other.isImageStateClonable_;
     imageType_ = other.imageType_;
+    lensType_ = other.lensType_;
     resolutionX_ = other.resolutionX_;
     resolutionY_ = other.resolutionY_;
     fieldOfView_ = other.fieldOfView_;
@@ -58,14 +74,12 @@ void Camera::copyCameraStateFrom(const Camera& other)
     farClipDistance_ = other.farClipDistance_;
     frameRate_ = other.frameRate_;
     delay_ = other.delay_;
-}
 
-
-Camera::Camera(const Camera& org, bool copyStateOnly)
-    : Device(org, copyStateOnly),
-      image_(org.image_)
-{
-    copyCameraStateFrom(org);
+    if(other.isImageStateClonable_){
+        image_ = other.image_;
+    } else {
+        image_ = std::make_shared<Image>();
+    }
 }
 
 
@@ -75,25 +89,9 @@ Device* Camera::clone() const
 }
 
 
-/**
-   Used for cloneState()
-*/
-Camera::Camera(const Camera& org, int x /* dummy */)
-    : Device(org, true)
-{
-    copyCameraStateFrom(org);
-    
-    if(org.isImageStateClonable_){
-        image_ = org.image_;
-    } else {
-        image_ = std::make_shared<Image>();
-    }
-}
-
-        
 DeviceState* Camera::cloneState() const
 {
-    return new Camera(*this, 0);
+    return new Camera(*this, true);
 }
 
 
@@ -102,6 +100,28 @@ void Camera::forEachActualType(std::function<bool(const std::type_info& type)> f
     if(!func(typeid(Camera))){
         Device::forEachActualType(func);
     }
+}
+
+
+void Camera::clearState()
+{
+    if(image_.use_count() == 1){
+        image_->clear();
+    } else {
+        image_ = std::make_shared<Image>();
+    }
+}
+
+
+bool Camera::on() const
+{
+    return on_;
+}
+
+
+void Camera::on(bool on)
+{
+    on_ = on;
 }
 
 
@@ -129,16 +149,6 @@ void Camera::setImage(std::shared_ptr<Image>& image)
         image_ = std::make_shared<Image>(*image);
     }
     image.reset();
-}
-
-
-void Camera::clearState()
-{
-    if(image_.use_count() == 1){
-        image_->clear();
-    } else {
-        image_ = std::make_shared<Image>();
-    }
 }
 
 

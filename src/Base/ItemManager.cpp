@@ -199,41 +199,39 @@ CreationPanelBaseMap creationPanelBaseMap;
 
 QWidget* importMenu;
 
-void forEachExtension(const string& extensions, function<bool(const string& extension)> func)
+std::map<ItemPtr, ItemPtr> reloadedItemToOriginalItemMap;
+
+
+vector<string> separateExtensions(const string& multiExtString)
 {
-    const char* str = extensions.c_str();
+    vector<string> extensions;
+    const char* str = multiExtString.c_str();
     do {
         const char* begin = str;
         while(*str != ';' && *str) ++str;
-        if(!func(string(begin, str))){
-            break;
-        }
+        extensions.push_back(string(begin, str));
     } while(0 != *str++);
-}
 
+    return extensions;
+}
+   
 
 QString makeExtensionFilter(const string& caption, const string& extensions, bool isAnyEnabled = false)
 {
-    QString filter;
-    if(!extensions.empty()){
-        forEachExtension(
-            extensions,
-            [&](const string& ext){
-                if(filter.isEmpty()){
-                    filter = caption.c_str();
-                    filter += " (";
-                } else {
-                    filter += " ";
-                }
-                filter += "*.";
-                filter += ext.c_str();
-                return true;
-            });
+    QString filter(caption.c_str());
+    auto exts = separateExtensions(extensions);
+    if(!exts.empty()){
+        QString prefix = " (";
+        for(auto& ext : exts){
+            filter += prefix;
+            filter += "*.";
+            filter += ext.c_str();
+            prefix = " ";
+        }
         filter += ")";
     } else if(isAnyEnabled){
-        filter = QString(caption.c_str()) + " (*)";
+        filter += " (*)";
     }
-        
     return filter;
 }
 
@@ -831,7 +829,7 @@ bool ItemManagerImpl::load(Item* item, const string& filename, Item* parentItem,
     const string& typeId = typeid(*item).name();
     ClassInfoMap::iterator p = typeIdToClassInfoMap.find(typeId);
     if(p == typeIdToClassInfoMap.end()){
-        messageView->putln(fmt(_("\"%1%\" cannot be loaded because item type \"%2%\" is not registered."))
+        messageView->putln(format(_("\"%1%\" cannot be loaded because item type \"%2%\" is not registered."))
                            % pathString % typeId);
         return false;
     }
@@ -850,34 +848,32 @@ bool ItemManagerImpl::load(Item* item, const string& filename, Item* parentItem,
             }
         }
     } else {
-        string extension = filesystem::extension(filepath);
-        if(extension.size() >= 2){
-            string ext = extension.substr(1); // remove dot
+        string dotextension = filesystem::extension(filepath);
+        if(dotextension.size() >= 2){
+            string extension = dotextension.substr(1); // remove dot
             for(list<LoaderPtr>::iterator p = loaders.begin(); p != loaders.end(); ++p){
                 LoaderPtr& loader = *p;
-                forEachExtension(
-                    loader->getExtensions(),
-                    [&](const string& ext2){
-                        if(ext == ext2){
-                            targetLoader = loader;
-                            return false;
-                        }
-                        return true;
-                    });
+                auto exts = separateExtensions(loader->getExtensions());
+                for(auto& ext : exts){
+                    if(ext == extension){
+                        targetLoader = loader;
+                        break;
+                    }
+                }
             }
         }
     }
 
     if(!targetLoader){
-        string message;
         if(formatId.empty()){
-            message = str(fmt(_("\"%1%\" cannot be loaded because the file format is unknown."))
-                          % pathString);
+            messageView->putln(
+                format(_("\"%1%\" cannot be loaded because the file format is unknown."))
+                % pathString);
         } else {
-            message = str(fmt(_("\"%1%\" cannot be loaded because file format \"%2%\" is unknown."))
-                          % pathString % formatId);
+            messageView->putln(
+                format(_("\"%1%\" cannot be loaded because file format \"%2%\" is unknown."))
+                % pathString % formatId);
         }
-        messageView->putln(message);
     } else {
         if(load(targetLoader, item, pathString, parentItem)){
             loaded = true;
@@ -896,8 +892,7 @@ bool ItemManagerImpl::load(LoaderPtr loader, Item* item, const string& filename_
 
         string filename(toActualPathName(filename_));
         
-        format f(fmt(_("Loading %1% \"%2%\"")));
-        messageView->notify(str(fmt(_("Loading %1% \"%2%\"")) % loader->caption % filename));
+        messageView->notify(format(_("Loading %1% \"%2%\"")) % loader->caption % filename);
         messageView->flush();
 
         if(!parentItem){
@@ -944,7 +939,7 @@ void ItemManagerImpl::onLoadSpecificTypeItemActivated(LoaderPtr loader)
     
     QFileDialog dialog(MainWindow::instance());
     //dialog.setOption(QFileDialog::DontUseNativeDialog);
-    dialog.setWindowTitle(str(fmt(_("Load %1%")) % loader->caption).c_str());
+    dialog.setWindowTitle(QString(_("Load %1")).arg(loader->caption.c_str()));
     dialog.setViewMode(QFileDialog::List);
     dialog.setLabelText(QFileDialog::Accept, _("Open"));
     dialog.setLabelText(QFileDialog::Reject, _("Cancel"));
@@ -1100,9 +1095,9 @@ bool ItemManagerImpl::save
         tryToSave = true;
         
         if(!doExport){
-            messageView->put(str(fmt(_("Saving %1% to \"%2%\"")) % itemLabel % filename));
+            messageView->notify(format(_("Saving %1% to \"%2%\"")) % itemLabel % filename);
         } else {
-            messageView->put(str(fmt(_("Exporting %1% into \"%2%\"")) % itemLabel % filename));
+            messageView->notify(format(_("Exporting %1% into \"%2%\"")) % itemLabel % filename);
         }
         
         Item* parentItem = item->parentItem();
@@ -1129,18 +1124,20 @@ bool ItemManagerImpl::save
         string actualFormatId = targetSaver ? targetSaver->formatId : formatId;
         if(actualFormatId.empty()){
             if(!doExport){
-                messageView->put(str(fmt(_("%1% cannot be saved.\n")) % itemLabel));
+                messageView->put(format(_("%1% cannot be saved.\n")) % itemLabel);
             } else {
-                messageView->put(str(fmt(_("%1% cannot be exported.\n")) % itemLabel));
+                messageView->put(format(_("%1% cannot be exported.\n")) % itemLabel);
             }
         } else {
             if(!doExport){
-                messageView->put(str(fmt(_("%1% cannot be saved as the %2% format.\n")) % itemLabel % actualFormatId));
+                messageView->put(format(_("%1% cannot be saved as the %2% format.\n")) % itemLabel % actualFormatId);
             } else {
-                messageView->put(str(fmt(_("%1% cannot be exported into the %2% format.\n")) % itemLabel % actualFormatId));
+                messageView->put(format(_("%1% cannot be exported into the %2% format.\n")) % itemLabel % actualFormatId);
             }
         }
     }
+
+    messageView->flush();
 
     return saved;
 }
@@ -1150,7 +1147,7 @@ ItemManagerImpl::SaverPtr ItemManagerImpl::getSaverAndFilenameFromSaveDialog
 (list<SaverPtr>& savers, bool doExport, const string& itemLabel, const string& formatId, string& io_filename)
 {
     QFileDialog dialog(MainWindow::instance());
-    dialog.setWindowTitle(str(fmt(_("Save %1% as")) % itemLabel).c_str());
+    dialog.setWindowTitle(QString(_("Save %1 as")).arg(itemLabel.c_str()));
     dialog.setFileMode(QFileDialog::AnyFile);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setViewMode(QFileDialog::List);
@@ -1204,7 +1201,6 @@ ItemManagerImpl::SaverPtr ItemManagerImpl::getSaverAndFilenameFromSaveDialog
 
             io_filename = dialog.selectedFiles()[0].toStdString();
             if(!io_filename.empty()){
-
                 int saverIndex = -1;
                 QString selectedFilter = dialog.selectedNameFilter();
                 for(int i=0; i < filters.size(); ++i){
@@ -1218,27 +1214,18 @@ ItemManagerImpl::SaverPtr ItemManagerImpl::getSaverAndFilenameFromSaveDialog
                     string extensions = targetSaver->getExtensions();
                     // add a lacking extension automatically
                     if(!extensions.empty()){
-                        string ext = filesystem::extension(filesystem::path(io_filename));
-                        bool extLacking = true;
-                        string firstExtension;
-                        if(!ext.empty()){
-                            ext = ext.substr(1); // remove the first dot
-                            forEachExtension(
-                                extensions,
-                                [&](const string& extension){
-                                    if(firstExtension.empty()){
-                                        firstExtension = extension;
-                                    }
-                                    if(ext == extension){
-                                        extLacking = false;
-                                        return false;
-                                    }
-                                    return true;
-                                });
+                        bool hasExtension = false;
+                        auto exts = separateExtensions(extensions);
+                        string dotextension = filesystem::extension(filesystem::path(io_filename));
+                        if(!dotextension.empty()){
+                            string extension = dotextension.substr(1); // remove the first dot
+                            if(std::find(exts.begin(), exts.end(), extension) != exts.end()){
+                                hasExtension = true;
+                            }
                         }
-                        if(extLacking){
+                        if(!hasExtension && !exts.empty()){
                             io_filename += ".";
-                            io_filename += firstExtension;
+                            io_filename += exts[0];
                         }
                     }
                 }
@@ -1264,18 +1251,19 @@ ItemManagerImpl::SaverPtr ItemManagerImpl::determineSaver
             }
         }
     } else {
-        string extension = filesystem::extension(filesystem::path(filename));
-        for(list<SaverPtr>::iterator p = savers.begin(); p != savers.end(); ++p){
-            SaverPtr& saver = *p;
-            forEachExtension(
-                saver->getExtensions(),
-                [&](const string& ext){
+        string dotextension = filesystem::extension(filesystem::path(filename));
+        if(!dotextension.empty()){
+            string extension = dotextension.substr(1);
+            for(list<SaverPtr>::iterator p = savers.begin(); p != savers.end(); ++p){
+                SaverPtr& saver = *p;
+                auto exts = separateExtensions(saver->getExtensions());
+                for(auto& ext : exts){
                     if(ext == extension){
                         targetSaver = saver;
-                        return false;
+                        break;
                     }
-                    return true;
-                });
+                }
+            }
         }
         if(!targetSaver && !savers.empty()){
             targetSaver = savers.front();
@@ -1345,6 +1333,8 @@ void ItemManagerImpl::onReloadSelectedItemsActivated()
 
 void ItemManager::reloadItems(const ItemList<>& items)
 {
+    reloadedItemToOriginalItemMap.clear();
+    
     for(size_t i=0; i < items.size(); ++i){
 
         Item* item = items.get(i);
@@ -1355,6 +1345,8 @@ void ItemManager::reloadItems(const ItemList<>& items)
             ItemPtr reloaded = item->duplicate();
             if(reloaded){
                 if(reloaded->load(item->filePath(), item->parentItem(), item->fileFormat())){
+
+                    reloadedItemToOriginalItemMap[reloaded] = item;
 
                     item->parentItem()->insertChildItem(reloaded, item);
                     
@@ -1375,6 +1367,18 @@ void ItemManager::reloadItems(const ItemList<>& items)
             }
         }
     }
+
+    reloadedItemToOriginalItemMap.clear();
+}
+
+
+Item* ItemManager::findOriginalItemForReloadedItem(Item* item)
+{
+    auto iter = reloadedItemToOriginalItemMap.find(item);
+    if(iter != reloadedItemToOriginalItemMap.end()){
+        return iter->second;
+    }
+    return nullptr;
 }
 
 

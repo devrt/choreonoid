@@ -267,6 +267,7 @@ public:
 
     unique_ptr<YAMLBodyLoader> subLoader;
     map<string, BodyPtr> subBodyMap;
+    vector<BodyPtr> subBodies;
     bool isSubLoader;
 
     ostream* os_;
@@ -287,7 +288,8 @@ public:
     bool readBody(Mapping* topNode);
     void readNodeInLinks(Mapping* linkNode, const string& nodeType);
     void readLinkNode(Mapping* linkNode);
-    LinkPtr readLinkContents(Mapping* linkNode);
+    void setLinkName(Link* link, const string& name, ValueNode* node);
+    LinkPtr readLinkContents(Mapping* linkNode, LinkPtr link = nullptr);
     void setJointId(Link* link, int id);
     void readJointContents(Link* link, Mapping* node);
     bool extractAxis(Mapping* node, const char* key, Vector3& out_axis);
@@ -310,6 +312,7 @@ public:
     bool readTransform(Mapping& node);
     bool readRigidBody(Mapping& node);
     bool readVisualOrCollision(Mapping& node, bool isVisual);
+    bool readResource(Mapping& node);
     bool readDevice(Device* device, Mapping& node);
     bool readForceSensor(Mapping& node);
     bool readRateGyroSensor(Mapping& node);
@@ -353,12 +356,16 @@ public:
         return 0.0;
     }
 
-    bool readAngle(Mapping& node, const char* key, double& angle){
+    bool readAngle(const Mapping& node, const char* key, double& angle) const {
         return sceneReader.readAngle(node, key, angle);
     }
 
-    bool readRotation(Mapping& node, Matrix3& out_R, bool doExtract){
-        return sceneReader.readRotation(node, out_R, doExtract);
+    bool readRotation(const Mapping& node, Matrix3& out_R) const {
+        return sceneReader.readRotation(node, out_R);
+    }
+    
+    bool extractRotation(Mapping& node, Matrix3& out_R) const {
+        return sceneReader.extractRotation(node, out_R);
     }
 };
 
@@ -409,7 +416,7 @@ void readInertia(Listing& inertia, Matrix3& I)
         I(2, 1) = I(1, 2);
         I(2, 2) = inertia[5].toDouble();
     } else {
-        inertia.throwException(_("The number of elements specified as an inertia value must be six or nine."));
+        inertia.throwException(_("The number of elements specified as an inertia value must be six or nine"));
     }
 }
 
@@ -466,12 +473,15 @@ YAMLBodyLoader::YAMLBodyLoader()
 YAMLBodyLoaderImpl::YAMLBodyLoaderImpl(YAMLBodyLoader* self)
     : self(self)
 {
+    sceneReader.setYAMLReader(&reader);
+    
     nodeFunctions["Skip"].set([&](Mapping& node){ return readSkipNode(node); });
     nodeFunctions["Group"].set([&](Mapping& node){ return readGroup(node); });
     nodeFunctions["Transform"].set([&](Mapping& node){ return readTransform(node); });
     nodeFunctions["RigidBody"].setTE([&](Mapping& node){ return readRigidBody(node); });
     nodeFunctions["Visual"].setT([&](Mapping& node){ return readVisualOrCollision(node, true); });
     nodeFunctions["Collision"].setT([&](Mapping& node){ return readVisualOrCollision(node, false); });
+    nodeFunctions["Resource"].set([&](Mapping& node){ return readResource(node); });
     nodeFunctions["ForceSensor"].setTE([&](Mapping& node){ return readForceSensor(node); });
     nodeFunctions["RateGyroSensor"].setTE([&](Mapping& node){ return readRateGyroSensor(node); });
     nodeFunctions["AccelerationSensor"].setTE([&](Mapping& node){ return readAccelerationSensor(node); });
@@ -548,6 +558,18 @@ void YAMLBodyLoaderImpl::updateCustomNodeFunctions()
 }
 
 
+YAMLSceneReader& YAMLBodyLoader::sceneReader()
+{
+    return impl->sceneReader;
+}
+
+
+const YAMLSceneReader& YAMLBodyLoader::sceneReader() const
+{
+    return impl->sceneReader;
+}
+
+
 bool YAMLBodyLoader::isDegreeMode() const
 {
     return impl->isDegreeMode();
@@ -560,15 +582,15 @@ double YAMLBodyLoader::toRadian(double angle) const
 }
 
 
-bool YAMLBodyLoader::readAngle(Mapping& node, const char* key, double& angle)
+bool YAMLBodyLoader::readAngle(const Mapping& node, const char* key, double& angle) const
 {
     return impl->readAngle(node, key, angle);
 }
 
 
-bool YAMLBodyLoader::readRotation(Mapping& node, Matrix3& out_R)
+bool YAMLBodyLoader::readRotation(const Mapping& node, Matrix3& out_R) const
 {
-    return impl->readRotation(node, out_R, false);
+    return impl->readRotation(node, out_R);
 }
 
 
@@ -585,6 +607,7 @@ bool YAMLBodyLoaderImpl::clear()
     validJointIdSet.clear();
     numValidJointIds = 0;
     subBodyMap.clear();
+    subBodies.clear();
     return true;
 }    
 
@@ -602,7 +625,6 @@ bool YAMLBodyLoaderImpl::load(Body* body, const std::string& filename)
     bool result = false;
 
     try {
-        YAMLReader reader;
         MappingPtr data = reader.loadDocument(filename)->toMapping();
         if(data){
             result = readTopNode(body, data);
@@ -618,6 +640,8 @@ bool YAMLBodyLoaderImpl::load(Body* body, const std::string& filename)
 
     os().flush();
 
+    reader.clearDocuments();
+    
     return result;
 }
 
@@ -631,7 +655,7 @@ bool YAMLBodyLoader::read(Body* body, Mapping* topNode)
 bool YAMLBodyLoaderImpl::readTopNode(Body* body, Mapping* topNode)
 {
     clear();
-    
+
     updateCustomNodeFunctions();
     
     bool result = false;
@@ -646,6 +670,9 @@ bool YAMLBodyLoaderImpl::readTopNode(Body* body, Mapping* topNode)
             result = loadAnotherFormatBodyFile(topNode);
         }
         if(result){
+            for(auto& subBody : subBodies){
+                topNode->insert(subBody->info());
+            }
             body->resetInfo(topNode);
         }
         
@@ -783,8 +810,12 @@ bool YAMLBodyLoaderImpl::readBody(Mapping* topNode)
                 ++p;
             }
         } else {
-            links->throwException(_("Invalid value specified in the \"links\" key."));
+            links->throwException(_("Invalid value specified in the \"links\" key"));
         }
+    }
+
+    if(linkInfos.empty()){
+        topNode->throwException(_("There is no link defined"));
     }
 
     auto rootLinkNode = topNode->extract("rootLink");
@@ -793,9 +824,12 @@ bool YAMLBodyLoaderImpl::readBody(Mapping* topNode)
         auto p = linkMap.find(rootLinkName);
         if(p == linkMap.end()){
             rootLinkNode->throwException(
-                str(format(_("Link \"%1%\" specified in \"rootLink\" is not defined.")) % rootLinkName));
+                str(format(_("Link \"%1%\" specified in \"rootLink\" is not defined")) % rootLinkName));
         }
         rootLink = p->second;
+
+    } else {
+        rootLink = linkInfos[0]->link;
     }
 
     // construct a link tree
@@ -806,23 +840,24 @@ bool YAMLBodyLoaderImpl::readBody(Mapping* topNode)
         if(parent.empty()){
             if(info->link != rootLink){
                 info->node->throwException(
-                    str(format(_("The parent of %1% is not specified.")) % link->name()));
+                    str(format(_("The parent of %1% is not specified")) % link->name()));
             }
         } else {
             auto p = linkMap.find(parent);
-            if(p != linkMap.end()){
-                Link* parentLink = p->second;
-                parentLink->appendChild(link);
-            } else {
+            if(p == linkMap.end()){
                 info->node->throwException(
                     str(format(_("Parent link \"%1%\" of %2% is not defined")) % parent % link->name()));
+            } else {
+                Link* parentLink = p->second;
+                if(link->isOwnerOf(parentLink)){
+                    info->node->throwException(
+                        str(format(_("Adding \"%1%\" to link \"%2%\" will result in a cyclic reference"))
+                            % link->name() % parent));
+                }
+                parentLink->appendChild(link);
             }
         }
     }        
-
-    if(!rootLink){
-        topNode->throwException(_("There is no link defined."));
-    }
 
     body->setRootLink(rootLink);
 
@@ -881,25 +916,31 @@ void YAMLBodyLoaderImpl::readLinkNode(Mapping* linkNode)
 {
     LinkInfoPtr info = new LinkInfo;
     extract(linkNode, "parent", info->parent);
-    Link* link = readLinkContents(linkNode);
-    info->link = link;
+    info->link = readLinkContents(linkNode);
     info->node = linkNode;
     linkInfos.push_back(info);
-    if(!rootLink){
-        rootLink = link;
+}
+
+
+void YAMLBodyLoaderImpl::setLinkName(Link* link, const string& name, ValueNode* node)
+{
+    link->setName(name);
+    
+    if(!linkMap.insert(make_pair(link->name(), link)).second){
+        node->throwException(str(format(_("Duplicated link name \"%1%\"")) % link->name()));
     }
 }
 
 
-LinkPtr YAMLBodyLoaderImpl::readLinkContents(Mapping* node)
+LinkPtr YAMLBodyLoaderImpl::readLinkContents(Mapping* node, LinkPtr link)
 {
-    LinkPtr link = body->createLink();
-
-    auto nameNode = node->extract("name");
-    if(nameNode){
-        link->setName(nameNode->toString());
-        if(!linkMap.insert(make_pair(link->name(), link)).second){
-            nameNode->throwException(str(format(_("Duplicated link name \"%1%\"")) % link->name()));
+    bool isSubBodyNode = (link != nullptr);
+    
+    if(!isSubBodyNode){
+        link = body->createLink();
+        auto nameNode = node->extract("name");
+        if(nameNode){
+            setLinkName(link, nameNode->toString(), nameNode);
         }
     }
 
@@ -907,7 +948,7 @@ LinkPtr YAMLBodyLoaderImpl::readLinkContents(Mapping* node)
         link->setOffsetTranslation(v);
     }
     Matrix3 R;
-    if(readRotation(*node, R, true)){
+    if(extractRotation(*node, R)){
         link->setOffsetRotation(R);
     }
 
@@ -928,7 +969,7 @@ LinkPtr YAMLBodyLoaderImpl::readLinkContents(Mapping* node)
         sceneGroupSetStack.push_back(SceneGroupSet());
         currentSceneGroupSet().newGroup<SgInvariantGroup>();
         
-        if(readElementContents(*elements)){
+        if(readElementContents(*elements) && !isSubBodyNode){
             SceneGroupSet& sgs = currentSceneGroupSet();
             sgs.setName(link->name());
             if(hasVisualOrCollisionNodes){
@@ -942,33 +983,36 @@ LinkPtr YAMLBodyLoaderImpl::readLinkContents(Mapping* node)
         sceneGroupSetStack.pop_back();
     }
 
-    RigidBody rbody;
-    if(!extractEigen(node, "centerOfMass", rbody.c)){
-        rbody.c.setZero();
-    }
-    if(!extract(node, "mass", rbody.m)){
-        rbody.m = 0.0;
-    }
-    if(!extractInertia(node, "inertia", rbody.I)){
-        rbody.I.setZero();
-    }
-    rigidBodies.push_back(rbody);
-    setMassParameters(link);
+    if(!isSubBodyNode){
+        RigidBody rbody;
+        if(!extractEigen(node, "centerOfMass", rbody.c)){
+            rbody.c.setZero();
+        }
+        if(!extract(node, "mass", rbody.m)){
+            rbody.m = 0.0;
+        }
+        if(!extractInertia(node, "inertia", rbody.I)){
+            rbody.I.setZero();
+        }
+        rigidBodies.push_back(rbody);
+        setMassParameters(link);
 
-    ValueNode* import = node->find("import");
-    if(import->isValid()){
-        if(import->isMapping()){
-            node->insert(import->toMapping());
-        } else if(import->isListing()){
-            Listing& importList = *import->toListing();
-            for(int i=importList.size() - 1; i >= 0; --i){
-                node->insert(importList[i].toMapping());
+        ValueNode* import = node->find("import");
+        if(import->isValid()){
+            if(import->isMapping()){
+                node->insert(import->toMapping());
+            } else if(import->isListing()){
+                Listing& importList = *import->toListing();
+                for(int i=importList.size() - 1; i >= 0; --i){
+                    node->insert(importList[i].toMapping());
+                }
             }
         }
+        
+        link->resetInfo(node);
     }
-    link->resetInfo(node);
 
-    currentLink = 0;
+    currentLink = nullptr;
 
     return link;
 }
@@ -1275,6 +1319,8 @@ bool YAMLBodyLoaderImpl::readElementContents(ValueNode& elements)
                 ++p;
             }
         }
+    } else {
+        elements.throwException(_("A value of the \"elements\" key must be a sequence or a mapping"));
     }
 
     return isSceneNodeAdded;
@@ -1354,7 +1400,7 @@ bool YAMLBodyLoaderImpl::readTransformContents(Mapping& node, NodeFunction nodeF
         T.translation() = v;
         hasPosTransform = true;
     }
-    if(readRotation(node, M, false)){
+    if(readRotation(node, M)){
         T.linear() = M;
         hasPosTransform = true;
     }
@@ -1464,13 +1510,13 @@ bool YAMLBodyLoaderImpl::readVisualOrCollision(Mapping& node, bool isVisual)
     if(isVisual){
         if(currentModelType == COLLISION){
             node.throwException(
-                _("The visual node is conflicting with the Collision node defined at the higher level."));
+                _("The visual node is conflicting with the Collision node defined at the higher level"));
         }
         currentModelType = VISUAL;
     } else {
         if(currentModelType == VISUAL){
             node.throwException(
-                _("The collision node is conflicting with the Visual node defined at the higher level."));
+                _("The collision node is conflicting with the Visual node defined at the higher level"));
         }
         currentModelType = COLLISION;
     }
@@ -1478,12 +1524,9 @@ bool YAMLBodyLoaderImpl::readVisualOrCollision(Mapping& node, bool isVisual)
     bool isSceneNodeAdded = readElements(node);
 
     if(isShapeLoadingEnabled){
-        auto resource = node.findMapping("resource");
-        if(resource->isValid()){
-            if(auto scene = sceneReader.readNode(*resource, "Resource")){
-                addScene(scene);
-                isSceneNodeAdded = true;
-            }
+        auto resourceNode = node.findMapping("resource");
+        if(resourceNode->isValid()){
+            isSceneNodeAdded = readResource(*resourceNode);
         }
         auto shape = node.findMapping("shape");
         if(shape->isValid()){
@@ -1502,6 +1545,35 @@ bool YAMLBodyLoaderImpl::readVisualOrCollision(Mapping& node, bool isVisual)
 
     return isSceneNodeAdded;
 }
+
+
+bool YAMLBodyLoaderImpl::readResource(Mapping& node)
+{
+    bool isSceneNodeAdded = false;
+    
+    auto resource = sceneReader.readResourceNode(node);
+
+    if(resource.scene){
+        addScene(resource.scene);
+        isSceneNodeAdded = true;
+
+    } else if(resource.info){
+        string orgBaseDirectory = sceneReader.baseDirectory();
+        sceneReader.setBaseDirectory(resource.directory);
+
+        //isSceneNodeAdded = readElementContents(*resource.node);
+        ValueNodePtr resourceNode = resource.info;
+        isSceneNodeAdded = readTransformContents(
+            node,
+            [this, resourceNode](Mapping&){
+                return readElementContents(*resourceNode); },
+            false);
+
+        sceneReader.setBaseDirectory(orgBaseDirectory);
+    }
+
+    return isSceneNodeAdded;
+}
         
 
 bool YAMLBodyLoader::readDevice(Device* device, Mapping& node)
@@ -1515,6 +1587,7 @@ bool YAMLBodyLoaderImpl::readDevice(Device* device, Mapping& node)
     device->setName(nameStack.back());
 
     if(node.read("id", id)) device->setId(id);
+    if(node.read("on", on)) device->on(on);
 
     const Affine3& T = transformStack.back();
     device->setLocalTranslation(T.translation());
@@ -1594,8 +1667,19 @@ bool YAMLBodyLoaderImpl::readCamera(Mapping& node)
             camera = new Camera;
         }
     }
-        
-    if(node.read("on", on)) camera->on(on);
+
+    if(node.read("lensType", symbol)){
+        if(symbol == "NORMAL"){
+            camera->setLensType(Camera::NORMAL_LENS);
+        } else if(symbol == "FISHEYE"){
+            camera->setLensType(Camera::FISHEYE_LENS);
+            //  throwException    ImageType must be COLOR
+        } else if(symbol == "DUAL_FISHEYE"){
+            camera->setLensType(Camera::DUAL_FISHEYE_LENS);
+            //  throwException    ImageType must be COLOR
+        }
+    }
+
     if(node.read("width", value)) camera->setResolutionX(value);
     if(node.read("height", value)) camera->setResolutionY(value);
     if(readAngle(node, "fieldOfView", value)) camera->setFieldOfView(value);
@@ -1611,8 +1695,6 @@ bool YAMLBodyLoaderImpl::readRangeSensor(Mapping& node)
 {
     RangeSensorPtr rangeSensor = new RangeSensor;
     
-    if(node.read("on", on)) rangeSensor->on(on);
-
     if(readAngle(node, "yawRange", value)){
         rangeSensor->setYawRange(value);
     } else if(readAngle(node, "scanAngle", value)){ // backward compatibility
@@ -1638,7 +1720,6 @@ bool YAMLBodyLoaderImpl::readSpotLight(Mapping& node)
 {
     SpotLightPtr light = new SpotLight();
 
-    if(node.read("on", on)) light->on(on);
     if(read(node, "color", color)) light->setColor(color);
     if(node.read("intensity", value)) light->setIntensity(value);
     if(read(node, "direction", v)) light->setDirection(v);
@@ -1659,20 +1740,20 @@ void YAMLBodyLoaderImpl::readContinuousTrackNode(Mapping* node)
 {
     string parent;
     if(!extract(node, "parent", parent)){
-        node->throwException("parent must be specified.");
+        node->throwException("parent must be specified");
     }
 
     int numJoints = 0;
     if(!extract(node, "numJoints", numJoints)){
-        node->throwException("numJoints must be specified.");
+        node->throwException("numJoints must be specified");
     }
     if(numJoints < 3){
-        node->throwException("numJoints must be more than 2.");
+        node->throwException("numJoints must be more than 2");
     }
 
     Vector3 jointOffset;
     if(!extractEigen(node, "jointOffset", jointOffset)){
-        node->throwException("jointOffset must be specified.");
+        node->throwException("jointOffset must be specified");
     }
 
     const int numOpenJoints = numJoints - 1;
@@ -1704,10 +1785,8 @@ void YAMLBodyLoaderImpl::readContinuousTrackNode(Mapping* node)
 
 void YAMLBodyLoaderImpl::addTrackLink(int index, LinkPtr link, Mapping* node, string& io_parent, double initialAngle)
 {
-    link->setName(str(format("%1%%2%") % link->name() % index));
-    if(!linkMap.insert(make_pair(link->name(), link)).second){
-        node->throwException(str(format(_("Duplicated link name \"%1%\"")) % link->name()));
-    }
+    setLinkName(link, str(format("%1%%2%") % link->name() % index), node);
+
     link->setInitialJointAngle(initialAngle);
 
     LinkInfoPtr info = new LinkInfo;
@@ -1724,7 +1803,7 @@ void YAMLBodyLoaderImpl::readSubBodyNode(Mapping* node)
 {
     string uri;
     if(!node->read("uri", uri)){
-        node->throwException("uri must be specified.");
+        node->throwException("uri must be specified");
     }
     
     filesystem::path filepath(uri);
@@ -1732,7 +1811,7 @@ void YAMLBodyLoaderImpl::readSubBodyNode(Mapping* node)
         filepath = getCompactPath(filesystem::path(sceneReader.baseDirectory()) / filepath);
     }
     if(filesystem::equivalent(mainFilePath, filepath)){
-        node->throwException("recursive sub-body is prohibited.");
+        node->throwException("recursive sub-body is prohibited");
     }
 
     BodyPtr subBody;
@@ -1763,6 +1842,7 @@ void YAMLBodyLoaderImpl::readSubBodyNode(Mapping* node)
 
     if(subBody){
         addSubBodyLinks(subBody->clone(), node);
+        subBodies.push_back(subBody);
     }
 }
 
@@ -1771,15 +1851,16 @@ void YAMLBodyLoaderImpl::addSubBodyLinks(BodyPtr subBody, Mapping* node)
 {
     string prefix;
     node->read("prefix", prefix);
+    string devicePrefix;
+    if(!node->read("devicePrefix", devicePrefix)){
+        devicePrefix = prefix;
+    }
 
     int jointIdOffset = node->get("jointIdOffset", 0);
 
     for(int i=0; i < subBody->numLinks(); ++i){
         Link* link = subBody->link(i);
-        link->setName(prefix + link->name());
-        if(!linkMap.insert(make_pair(link->name(), link)).second){
-            node->throwException(str(format(_("Duplicated link name \"%1%\"")) % link->name()));
-        }
+        setLinkName(link, prefix + link->name(), node);
         if(link->jointId() >= 0){
             setJointId(link, link->jointId() + jointIdOffset);
         }
@@ -1792,30 +1873,18 @@ void YAMLBodyLoaderImpl::addSubBodyLinks(BodyPtr subBody, Mapping* node)
     
     for(int i=0; i < subBody->numDevices(); ++i){
         Device* device = subBody->device(i);
-        device->setName(prefix + device->name());
+        device->setName(devicePrefix + device->name());
         body->addDevice(device);
     }
 
-    Link* rootLink = subBody->rootLink();
+    LinkPtr rootLink = subBody->rootLink();
 
-    readJointContents(rootLink, node);
-
-    if(read(*node, "translation", v)){
-        rootLink->setOffsetTranslation(v);
-    }
-    Matrix3 R;
-    if(readRotation(*node, R, true)){
-        rootLink->setOffsetRotation(R);
-    }
-
+    readLinkContents(node, rootLink);
+    
     LinkInfoPtr linkInfo = new LinkInfo;
     linkInfo->link = rootLink;
     linkInfo->node = node;
-
-    if(!node->read("parent", linkInfo->parent)){
-        node->throwException("parent must be specified.");
-    }
-
+    node->read("parent", linkInfo->parent);
     linkInfos.push_back(linkInfo);
 }
 
@@ -1846,7 +1915,7 @@ void YAMLBodyLoaderImpl::readExtraJoint(Mapping* node)
     for(int i=0; i < 2; ++i){
         if(!joint.link[i]){
             node->throwException(
-                str(format(_("The link specified in \"link%1%Name\" is not found.")) % (i + 1)));
+                str(format(_("The link specified in \"link%1%Name\" is not found")) % (i + 1)));
         }
     }
 
@@ -1854,12 +1923,12 @@ void YAMLBodyLoaderImpl::readExtraJoint(Mapping* node)
     if(jointType == "piston"){
         joint.type = ExtraJoint::EJ_PISTON;
         if(!readAxis(node, "jointAxis", joint.axis)){
-            node->throwException(_("The jointAxis value must be specified for the pistion type."));
+            node->throwException(_("The jointAxis value must be specified for the pistion type"));
         }
     } else if(jointType == "ball"){
         joint.type = ExtraJoint::EJ_BALL;
     } else {
-        node->throwException(str(format(_("Joint type \"%1%\" is not available.")) % jointType));
+        node->throwException(str(format(_("Joint type \"%1%\" is not available")) % jointType));
     }
 
     readEx(*node, "link1LocalPos", joint.point[0]);

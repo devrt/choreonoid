@@ -1,6 +1,7 @@
 # @author Shin'ichiro Nakaoka
 
 set(headers
+  PyBase.h
   PyItemList.h
   PyQString.h
   exportdecl.h
@@ -30,6 +31,7 @@ add_cnoid_python_module(PyBase
   PySceneTypes.cpp
   PyLazyCaller.cpp
   PyPluginManager.cpp
+  PyProjectManager.cpp
 )
 
 target_link_libraries(PyBase CnoidPyBase)

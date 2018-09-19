@@ -340,7 +340,7 @@ bool BodyItemImpl::loadModelFile(const std::string& filename)
     if(newBody){
         body = newBody;
         body->setName(self->name());
-        body->initializeState();
+        body->initializePosition();
     }
 
     initBody(false);
@@ -358,7 +358,7 @@ void BodyItem::setBody(Body* body)
 void BodyItemImpl::setBody(Body* body_)
 {
     body = body_;
-    body->initializeState();
+    body->initializePosition();
 
     initBody(false);
 }
@@ -684,7 +684,7 @@ void BodyItemImpl::createPenetrationBlocker(Link* link, bool excludeSelfCollisio
     WorldItem* worldItem = self->findOwnerItem<WorldItem>();
     if(worldItem){
         blocker = std::make_shared<PenetrationBlocker>(worldItem->collisionDetector()->clone(), link);
-        const ItemList<BodyItem>& bodyItems = worldItem->collisionBodyItems();
+        const ItemList<BodyItem>& bodyItems = worldItem->coldetBodyItems();
         for(size_t i=0; i < bodyItems.size(); ++i){
             BodyItem* bodyItem = bodyItems.get(i);
             if(bodyItem != self && bodyItem->body()->isStaticModel()){
@@ -1208,11 +1208,12 @@ bool BodyItemImpl::restore(const Archive& archive)
 
     if(restored){
 
-        Vector3 p;
+        Vector3 p = Vector3::Zero();
+        Matrix3 R = Matrix3::Identity();
+        
         if(read(archive, "rootPosition", p)){
             body->rootLink()->p() = p;
         }
-        Matrix3 R;
         if(read(archive, "rootAttitude", R)){
             body->rootLink()->R() = R;
         }
@@ -1220,9 +1221,11 @@ bool BodyItemImpl::restore(const Archive& archive)
         if(qs->isValid()){
             int nj = body->numAllJoints();
             if(qs->size() != nj){
-                MessageView::instance()->putln(
-                    MessageView::WARNING,
-                    format("Mismatched size of the stored joint positions for %1%") % self->name());
+                if(qs->size() != body->numJoints()){
+                    MessageView::instance()->putln(
+                        format("Mismatched size of the stored joint positions for %1%") % self->name(),
+                        MessageView::WARNING);
+                }
                 nj = std::min(qs->size(), nj);
             }
             for(int i=0; i < nj; ++i){
@@ -1233,17 +1236,20 @@ bool BodyItemImpl::restore(const Archive& archive)
         //! \todo replace the following code with the ValueTree serialization function of BodyState
         initialState.clear();
 
-        if(read(archive, "initialRootPosition", p) && read(archive, "initialRootAttitude", R)){
-            initialState.setRootLinkPosition(SE3(p, R));
-        }
+        read(archive, "initialRootPosition", p);
+        read(archive, "initialRootAttitude", R);
+        initialState.setRootLinkPosition(SE3(p, R));
+
         qs = archive.findListing("initialJointPositions");
         if(qs->isValid()){
             BodyState::Data& q = initialState.data(BodyState::JOINT_POSITIONS);
             int nj = body->numAllJoints();
             if(qs->size() != nj){
-                MessageView::instance()->putln(
-                    MessageView::WARNING,
-                    format("Mismatched size of the stored initial joint positions for %1%") % self->name());
+                if(qs->size() != body->numJoints()){
+                    MessageView::instance()->putln(
+                        format("Mismatched size of the stored initial joint positions for %1%") % self->name(),
+                        MessageView::WARNING);
+                }
                 nj = std::min(qs->size(), nj);
             }
             q.resize(nj);

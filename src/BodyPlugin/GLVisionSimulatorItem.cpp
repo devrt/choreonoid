@@ -6,6 +6,7 @@
 #include "GLVisionSimulatorItem.h"
 #include "SimulatorItem.h"
 #include "WorldItem.h"
+#include "FisheyeLensConverter.h"
 #include <cnoid/ItemManager>
 #include <cnoid/MessageView>
 #include <cnoid/Archive>
@@ -54,7 +55,17 @@ using boost::format;
 
 namespace {
 
-inline double myNearByInt(double x)
+enum ScreenId {
+    NO_SCREEN = FisheyeLensConverter::NO_SCREEN,
+    FRONT_SCREEN = FisheyeLensConverter::FRONT_SCREEN,
+    LEFT_SCREEN = FisheyeLensConverter::LEFT_SCREEN,
+    RIGHT_SCREEN = FisheyeLensConverter::RIGHT_SCREEN,
+    TOP_SCREEN = FisheyeLensConverter::TOP_SCREEN,
+    BOTTOM_SCREEN = FisheyeLensConverter::BOTTOM_SCREEN,
+    BACK_SCREEN = FisheyeLensConverter::BACK_SCREEN
+};
+
+double myNearByInt(double x)
 {
 #ifdef Q_OS_WIN32
     double u = ceil(x);
@@ -176,6 +187,8 @@ public:
     std::shared_ptr<Image> tmpImage;
     std::shared_ptr<RangeCamera::PointData> tmpPoints;
     std::shared_ptr<RangeSensor::RangeData> tmpRangeData;
+    int screenId;
+    bool isDense;
 
     SensorScreenRenderer(GLVisionSimulatorItemImpl* simImpl, Device* device, Device* deviceForRendering);
     ~SensorScreenRenderer();
@@ -215,8 +228,10 @@ public:
     SensorScenePtr sharedScene;
     vector<SensorScenePtr> scenes;
     vector<SensorScreenRendererPtr> screens;
+    bool wasDeviceOn;
     bool isRendering;  // only updated and referred to in the simulation thread
     std::shared_ptr<RangeSensor::RangeData> rangeData;
+    FisheyeLensConverter fisheyeLensConverter;
 
     SensorRenderer(GLVisionSimulatorItemImpl* simImpl, Device* sensor, SimulationBody* simBody, int bodyIndex);
     ~SensorRenderer();
@@ -278,6 +293,7 @@ public:
     double maxFrameRate;
     double maxLatency;
     SgCloneMap cloneMap;
+    bool isAntiAliasingEnabled;
         
     GLVisionSimulatorItemImpl(GLVisionSimulatorItem* self);
     GLVisionSimulatorItemImpl(GLVisionSimulatorItem* self, const GLVisionSimulatorItemImpl& org);
@@ -340,6 +356,8 @@ GLVisionSimulatorItemImpl::GLVisionSimulatorItemImpl(GLVisionSimulatorItem* self
     threadMode.setSymbol(GLVisionSimulatorItem::SENSOR_THREAD_MODE, N_("Sensor"));
     threadMode.setSymbol(GLVisionSimulatorItem::SCREEN_THREAD_MODE, N_("Screen"));
     threadMode.select(GLVisionSimulatorItem::SENSOR_THREAD_MODE);
+
+    isAntiAliasingEnabled = false;
 }
 
 
@@ -371,6 +389,7 @@ GLVisionSimulatorItemImpl::GLVisionSimulatorItemImpl(GLVisionSimulatorItem* self
     areAdditionalLightsEnabled = org.areAdditionalLightsEnabled;
     maxFrameRate = org.maxFrameRate;
     maxLatency = org.maxLatency;
+    isAntiAliasingEnabled = org.isAntiAliasingEnabled;
 }
 
 
@@ -615,8 +634,60 @@ SensorRenderer::SensorRenderer(GLVisionSimulatorItemImpl* simImpl, Device* devic
     rangeSensor = dynamic_cast<RangeSensor*>(device);
     
     if(camera){
-        screens.push_back(new SensorScreenRenderer(simImpl, device, deviceForRendering));
-        
+        auto lensType = camera->lensType();
+
+        if(lensType == Camera::NORMAL_LENS){
+            screens.push_back(new SensorScreenRenderer(simImpl, device, deviceForRendering));
+
+        } else if(lensType == Camera::FISHEYE_LENS || lensType ==  Camera::DUAL_FISHEYE_LENS){
+            int numScreens = 5;
+            double fov = camera->fieldOfView();
+            if(fov <= radian(90)){
+                numScreens = 1;
+            }
+            int resolution = camera->resolutionX();
+            int width = resolution;
+            int height = resolution;
+            if(camera->lensType()==Camera::DUAL_FISHEYE_LENS){
+                numScreens = 6;
+                resolution /= 2;
+                height /=2;
+                fov = radian(180);
+            }
+            if(fov > radian(180)){
+                fov = radian(180);
+            }
+            resolution /= 2;   //screen resolution
+
+            Matrix3 R[6];
+            R[FRONT_SCREEN] = camera->localRotaion();
+            if(numScreens > 1){
+                R[RIGHT_SCREEN]  = R[FRONT_SCREEN] * AngleAxis(radian(-90.0), Vector3::UnitY());
+                R[LEFT_SCREEN]   = R[FRONT_SCREEN] * AngleAxis(radian(90.0),  Vector3::UnitY());
+                R[TOP_SCREEN]    = R[FRONT_SCREEN] * AngleAxis(radian(90.0),  Vector3::UnitX());
+                R[BOTTOM_SCREEN] = R[FRONT_SCREEN] * AngleAxis(radian(-90.0), Vector3::UnitX());
+                if(numScreens == 6){
+                    R[BACK_SCREEN] = R[FRONT_SCREEN] * AngleAxis(radian(180.0), Vector3::UnitY());
+                }
+            }
+
+            fisheyeLensConverter.initialize(width, height, fov, resolution);
+            fisheyeLensConverter.setImageRotationEnabled(camera->lensType() == Camera::DUAL_FISHEYE_LENS);
+            fisheyeLensConverter.setAntiAliasingEnabled(simImpl->isAntiAliasingEnabled);
+            
+            for(int i=0; i < numScreens; ++i){
+                auto cameraForRendering = new Camera(*camera);
+                auto screen = new SensorScreenRenderer(simImpl, device, cameraForRendering);
+                screen->screenId = i;
+                cameraForRendering->setLocalRotation(R[i]);
+                cameraForRendering->setResolution(resolution,resolution);
+
+                screen->tmpImage = std::make_shared<Image>();
+                fisheyeLensConverter.addScreenImage(screen->tmpImage);
+
+                screens.push_back(screen);
+            }
+        }
     } else if(rangeSensor){
 
         int numScreens = 1;
@@ -701,10 +772,10 @@ bool SensorRenderer::initialize(const vector<SimulationBody*>& simBodies)
         }
     }
 
-    elapsedTime = cycleTime + 1.0e-6;
+    elapsedTime = 0.0;
     latency = std::min(cycleTime, simImpl->maxLatency);
     onsetTime = 0.0;
-    
+    wasDeviceOn = false;
     isRendering = false;
 
     if(simImpl->useThreadsForSensors){
@@ -776,6 +847,7 @@ SensorScreenRenderer::SensorScreenRenderer(GLVisionSimulatorItemImpl* simImpl, D
 #endif
 
     renderer = 0;
+    screenId = FRONT_SCREEN;
 }
 
 
@@ -802,12 +874,30 @@ SgCamera* SensorScreenRenderer::initializeCamera(int bodyIndex)
     SgCamera* sceneCamera = nullptr;
 
     if(camera){
-        auto sceneDevice = sceneBody->getSceneDevice(camera);
-        if(sceneDevice){
-            sceneCamera = sceneDevice->findNodeOfType<SgCamera>();
-            pixelWidth = camera->resolutionX();
-            pixelHeight = camera->resolutionY();
-         }
+        auto lensType = camera->lensType();
+        if(lensType == Camera::NORMAL_LENS){
+            auto sceneDevice = sceneBody->getSceneDevice(camera);
+            if(sceneDevice){
+                sceneCamera = sceneDevice->findNodeOfType<SgCamera>();
+                pixelWidth = camera->resolutionX();
+                pixelHeight = camera->resolutionY();
+            }
+        } else if(lensType == Camera::FISHEYE_LENS || lensType == Camera::DUAL_FISHEYE_LENS){
+            auto sceneLink = sceneBody->sceneLink(camera->link()->index());
+            if(sceneLink){
+                auto persCamera = new SgPerspectiveCamera;
+                sceneCamera = persCamera;
+                persCamera->setNearClipDistance(cameraForRendering->nearClipDistance());
+                persCamera->setFarClipDistance(cameraForRendering->farClipDistance());
+                persCamera->setFieldOfView(radian(90.0));
+                auto cameraPos = new SgPosTransform();
+                cameraPos->setTransform(camera->link()->Rs().transpose() * cameraForRendering->T_local());
+                cameraPos->addChild(persCamera);
+                sceneLink->addChild(cameraPos);
+                pixelWidth = cameraForRendering->resolutionX();
+                pixelHeight = cameraForRendering->resolutionY();
+            }
+        }
     } else if(rangeSensor){
         auto sceneLink = sceneBody->sceneLink(rangeSensor->link()->index());
         if(sceneLink){
@@ -916,6 +1006,28 @@ void SensorScreenRenderer::initializeGL(SgCamera* sceneCamera)
     if(rangeSensorForRendering){
         renderer->setDefaultLighting(false);
     } else {
+        if(screenId != FRONT_SCREEN){
+            SgDirectionalLight* headLight = dynamic_cast<SgDirectionalLight*>(renderer->headLight());
+            if(headLight){
+                switch(screenId){
+                case LEFT_SCREEN:
+                    headLight->setDirection(Vector3( 1, 0, 0));
+                    break;
+                case RIGHT_SCREEN:
+                    headLight->setDirection(Vector3( -1, 0 ,0));
+                    break;
+                case TOP_SCREEN:
+                    headLight->setDirection(Vector3( 0, -1 ,0));
+                    break;
+                case BOTTOM_SCREEN:
+                    headLight->setDirection(Vector3( 0, 1 ,0));
+                    break;
+                case BACK_SCREEN:
+                    headLight->setDirection(Vector3( 0, 0 ,1));
+                    break;
+                }
+            }
+        }
         renderer->headLight()->on(simImpl->isHeadLightEnabled);
         renderer->enableAdditionalLights(simImpl->areAdditionalLightsEnabled);
     }
@@ -1015,25 +1127,32 @@ void GLVisionSimulatorItemImpl::onPreDynamics()
     
     for(size_t i=0; i < sensorRenderers.size(); ++i){
         auto& renderer = sensorRenderers[i];
-        if(renderer->elapsedTime >= renderer->cycleTime){
-            if(!renderer->isRendering){
-                renderer->onsetTime = currentTime;
-                renderer->isRendering = true;
-                if(useThreadsForSensors){
-                    renderer->startConcurrentRendering();
-                } else {
-                    if(!pQueueMutex){
-                        pQueueMutex = &queueMutex;
-                        pQueueMutex->lock();
-                    }
-                    renderer->updateSensorScene(true);
-                    sensorQueue.push(renderer);
-                }
-                renderer->elapsedTime -= renderer->cycleTime;
-                renderersInRendering.push_back(renderer);
+        bool isOn = renderer->device->on();
+        if(isOn){
+            if(!renderer->wasDeviceOn){
+                renderer->elapsedTime = renderer->cycleTime;
             }
+            if(renderer->elapsedTime >= renderer->cycleTime){
+                if(!renderer->isRendering){
+                    renderer->onsetTime = currentTime;
+                    renderer->isRendering = true;
+                    if(useThreadsForSensors){
+                        renderer->startConcurrentRendering();
+                    } else {
+                        if(!pQueueMutex){
+                            pQueueMutex = &queueMutex;
+                            pQueueMutex->lock();
+                        }
+                        renderer->updateSensorScene(true);
+                        sensorQueue.push(renderer);
+                    }
+                    renderer->elapsedTime -= renderer->cycleTime;
+                    renderersInRendering.push_back(renderer);
+                }
+            }
+            renderer->elapsedTime += worldTimeStep;
         }
-        renderer->elapsedTime += worldTimeStep;
+        renderer->wasDeviceOn = isOn;
     }
 
     if(pQueueMutex){
@@ -1320,15 +1439,22 @@ void SensorRenderer::copyVisionData()
     if(hasUpdatedData){
         double delay = simImpl->currentTime - onsetTime;
         if(camera){
-            auto& screen = screens[0];
-            if(!screen->tmpImage->empty()){
-                camera->setImage(screen->tmpImage);
-            }
-            if(rangeCamera){
-                rangeCamera->setPoints(screen->tmpPoints);
+            auto lensType = camera->lensType();
+            if(lensType == Camera::NORMAL_LENS){
+                auto& screen = screens[0];
+                if(!screen->tmpImage->empty()){
+                    camera->setImage(screen->tmpImage);
+                }
+                if(rangeCamera){
+                    rangeCamera->setPoints(screen->tmpPoints);
+                    rangeCamera->setDense(screen->isDense);
+                }
+            } else if(lensType == Camera::FISHEYE_LENS || lensType == Camera::DUAL_FISHEYE_LENS){
+                std::shared_ptr<Image> image = std::make_shared<Image>();
+                fisheyeLensConverter.convertImage(image.get());
+                camera->setImage(image);
             }
             camera->setDelay(delay);
-
         } else if(rangeSensor){
             if(screens.empty()){
                 rangeData = std::make_shared<vector<double>>();
@@ -1432,6 +1558,8 @@ bool SensorScreenRenderer::getRangeCameraData(Image& image, vector<Vector3f>& po
     points.clear();
     points.reserve(pixelWidth * pixelHeight);
     unsigned char* colorSrc = 0;
+
+    isDense = true;
     
     for(int y = pixelHeight - 1; y >= 0; --y){
         int srcpos = y * pixelWidth;
@@ -1481,6 +1609,7 @@ bool SensorScreenRenderer::getRangeCameraData(Image& image, vector<Vector3f>& po
                     pixels[2] = colorSrc[2];
                     pixels += 3;
                 }
+                isDense = false;
             }
             colorSrc += 3;
         }
@@ -1700,6 +1829,7 @@ void GLVisionSimulatorItemImpl::doPutProperties(PutPropertyFunction& putProperty
     putProperty.reset()(_("Depth error"), depthError, changeProperty(depthError));
     putProperty.reset()(_("Head light"), isHeadLightEnabled, changeProperty(isHeadLightEnabled));
     putProperty.reset()(_("Additional lights"), areAdditionalLightsEnabled, changeProperty(areAdditionalLightsEnabled));
+    putProperty(_("Anti-aliasing"), isAntiAliasingEnabled, changeProperty(isAntiAliasingEnabled));
 }
 
 
@@ -1724,6 +1854,7 @@ bool GLVisionSimulatorItemImpl::store(Archive& archive)
     archive.write("depthError", depthError);
     archive.write("enableHeadLight", isHeadLightEnabled);    
     archive.write("enableAdditionalLights", areAdditionalLightsEnabled);
+    archive.write("antiAliasing", isAntiAliasingEnabled);
     return true;
 }
 
@@ -1751,6 +1882,7 @@ bool GLVisionSimulatorItemImpl::restore(const Archive& archive)
     archive.read("depthError", depthError);
     archive.read("enableHeadLight", isHeadLightEnabled);
     archive.read("enableAdditionalLights", areAdditionalLightsEnabled);
+    archive.read("antiAliasing", isAntiAliasingEnabled);
 
     string symbol;
     if(archive.read("threadMode", symbol)){

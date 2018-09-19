@@ -21,7 +21,8 @@ public:
     RTC::RtcBase* rtc() { return rtc_; };
     bool isValid() const;
     const std::string& name() const { return componentName; }
-        
+    void activate();
+
 private:
     RTC::RTObject_var rtcRef;
     RTC::RtcBase* rtc_;
@@ -33,7 +34,7 @@ private:
     void init(const std::string& moduleName, PropertyMap& properties);
     void init(const boost::filesystem::path& modulePath, PropertyMap& properties);
     bool createRTC(PropertyMap& properties);
-    void setupModules(std::string& fileName, std::string& initFuncName, std::string& componentName, PropertyMap& properties );
+    void setupModules(std::string& fileName, std::string& initFuncName, std::string& componentName, PropertyMap& properties);
     void createProcess(std::string& command, PropertyMap& properties);
     void onReadyReadServerProcessOutput();
 };
@@ -42,20 +43,22 @@ class CNOID_EXPORT RTCItem : public Item
 {
 public:
     static void initialize(ExtensionManager* ext);
-        
+
     RTCItem();
     RTCItem(const RTCItem& org);
     virtual ~RTCItem();
-    
-    enum PERIODIC_TYPE {
+
+    enum PERIODIC_TYPE
+    {
         PERIODIC_EXECUTION_CONTEXT = 0,
         SYNCH_EXT_TRIGGER,
         EXT_TRIG_EXECUTION_CONTEXT,
-        CHOREONOID_EXECUTION_CONTEXT,
+        SIMULATION_EXECUTION_CONTEXT,
         N_PERIODIC_TYPE
     };
-    
-    enum BaseDirectoryType {
+
+    enum BaseDirectoryType
+    {
         NO_BASE_DIRECTORY,
         RTC_DIRECTORY,
         PROJECT_DIRECTORY,
@@ -66,6 +69,8 @@ public:
     void setPeriodicType(int type);
     void setPeriodicRate(int rate);
     void setBaseDirectoryType(int base);
+    void setActivationEnabled(bool on);
+    bool isActivationEnabled() const { return isActivationEnabled_; }
 
 protected:
     virtual void onPositionChanged();
@@ -74,7 +79,7 @@ protected:
     virtual void doPutProperties(PutPropertyFunction& putProperty);
     virtual bool store(Archive& archive);
     virtual bool restore(const Archive& archive);
-        
+
 private:
     std::ostream& os;
     MessageView* mv;
@@ -88,10 +93,13 @@ private:
     int oldBaseDirectoryType;
     boost::filesystem::path rtcDirectory;
     boost::filesystem::path modulePath;
+    bool isActivationEnabled_;
 
+    void deleteRTCInstance();
+    void updateRTCInstance(bool forceUpdate = true);
     bool convertAbsolutePath();
 };
-        
+
 typedef ref_ptr<RTCItem> RTCItemPtr;
 
 }
