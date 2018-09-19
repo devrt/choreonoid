@@ -16,5 +16,5 @@ ADD . /choreonoid
 RUN cd /choreonoid && \
     echo "y" | ./misc/script/install-requisites-ubuntu-16.04.sh && \
     cmake . && \
-    make -j && \
+    make -j$(nproc) && \
     make install
